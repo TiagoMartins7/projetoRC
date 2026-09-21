@@ -37,6 +37,7 @@ check_files:
 	diff -s $(TX_FILE) $(RX_FILE) || exit 0
 
 # Cable
+.PHONY: cable
 cable: $(CABLE)/cable.c
 	$(CC) $(CFLAGS) -o $(BIN)/$@ $^
 
@@ -48,7 +49,7 @@ run_cable: cable
 # Create bin directory
 .PHONY: bin_dir
 bin_dir:
-	mkdir -p $(BIN)
+	mkdir -p $(BIN) && chmod u+rwx $(BIN)
 
 # Clean
 .PHONY: clean
