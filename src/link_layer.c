@@ -7,107 +7,91 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <signal.h>
+#include <stdlib.h>
 
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
 #define BUF_SIZE 256
 
+// ALARM
+#define MAX_ATTEMPTS 3
+#define TIMEOUT 3 // seconds
+
+int alarmEnabled = FALSE;
+int alarmCount = 0;
+
+
 ////////////////////////////////////////////////
 // LLOPEN
 ////////////////////////////////////////////////
-int llOpenTx(LinkLayer llParameters)
-{
-    // ----------------------------------------------------
-    // This example code shows how to open the serial port and send a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
+int llOpenTx(LinkLayer llParameters) {
 
-    if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
-    {
+    if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0) {
         perror("openSerialPort");
         return -1;
     }
-
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Create string to send
-    unsigned char buf[BUF_SIZE] = {0};
 
-    for (int i = 0; i < BUF_SIZE; i++)
+    struct sigaction act = {0};
+    act.sa_handler = &alarmHandler;
+    if (sigaction(SIGALRM, &act, NULL) == -1)
     {
-        buf[i] = 'a' + i % 26;
+        perror("sigaction");
+        exit(1);
     }
 
-    // In non-canonical mode, '\n' does not end the writing.
-    // Test this condition by placing a '\n' in the middle of the buffer.
-    // The whole buffer must be sent even with the '\n'.
-    buf[5] = '\n';
 
-    int bytes = writeBytesSerialPort(buf, BUF_SIZE);
-    printf("%d bytes written to serial port\n", bytes);
+    unsigned char setBuf[BUF_SIZE] = {0};
+    unsigned char uaBuf[BUF_SIZE] = {0};
+    int setBufSize = createFrame(A_SENDER, SET, setBuf);
 
-    // Wait until all bytes have been written to the serial port
-    sleep(1);
+    while (alarmCount < MAX_ATTEMPTS) {
+        printf("Sending SET frame, attempt %d\n", alarmCount + 1);
+        writeBytesSerialPort(setBuf, setBufSize);
 
-    // Close serial port
-    if (closeSerialPort() < 0)
-    {
+        alarm(TIMEOUT); // Set the alarm for timeout
+        readFrame(uaBuf);  // Read the response frame from the receiver
+        alarmEnabled = FALSE;
+
+        if (uaBuf[1] == A_RECEIVER && uaBuf[2] == UA) {
+            printf("Received UA, connection established\n");
+            break;
+        }
+    }
+    alarm(0); // Cancel the alarm
+    
+    if (closeSerialPort() < 0) {
         perror("closeSerialPort");
         return -1;
     }
-
     printf("Serial port %s closed\n", llParameters.serialPort);
-
     return 0;
 }
 
-int llOpenRx(LinkLayer llParameters)
-{
-    // ----------------------------------------------------
-    // This example code shows how to open the serial port and receive a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
+int llOpenRx(LinkLayer llParameters) {
 
-    if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
-    {
+    if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0) {
         perror("openSerialPort");
         return -1;
     }
-
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Read from serial port until the 'z' char is received.
+    unsigned char buf[BUF_SIZE] = {0};
+    
+    readFrame(buf);
 
-    // NOTE: This while() cycle is a simple example showing how to read from the serial port.
-    // It must be changed in order to respect the specifications of the protocol indicated in the Lab guide.
-
-    // TODO: Save the received bytes in a buffer array and print it at the end of the program.
-    volatile int STOP = FALSE;
-    int nBytesBuf = 0;
-
-    while (STOP == FALSE)
-    {
-        // Read one byte from serial port.
-        // NOTE: You must check how many bytes were actually read by reading the return value.
-        // In this example, we assume that the byte is always read, which may not be true.
-        unsigned char byte;
-        int bytes = readByteSerialPort(&byte);
-        nBytesBuf += bytes;
-
-        printf("Byte received: %c\n", byte);
-
-        if (byte == 'z')
-        {
-            printf("Received 'z' char. Stop reading from serial port.\n");
-            STOP = TRUE;
-        }
+    if (buf[1] == A_SENDER && buf[2] == SET) {
+        printf("Received SET, sending UA\n");
+        int bufSize = createFrame(A_RECEIVER, UA, buf);
+        int bytes = writeBytesSerialPort(buf, bufSize);
+        printf("%d bytes written to serial port\n", bytes);
+    } else {
+        printf("Received unexpected frame. Closing connection.\n");
     }
 
-    printf("Total bytes received: %d\n", nBytesBuf);
-
-    // Close serial port
-    if (closeSerialPort() < 0)
-    {
+    if (closeSerialPort() < 0) {
         perror("closeSerialPort");
         return -1;
     }
@@ -152,4 +136,68 @@ int llCloseRx()
     // TODO: Implement this function
 
     return 0;
+}
+
+
+
+////////////////////////////////////////////////
+// Helper functions
+////////////////////////////////////////////////
+int createFrame(AddressField address, ControlField control, unsigned char* frame) {
+
+    frame[0] = FLAG; // Start flag
+    frame[1] = address; // Address field
+    frame[2] = control; // Control field
+    frame[3] = frame[1] ^ frame[2]; // BCC1
+    frame[4] = FLAG; // End flag
+
+    return 5;
+}
+
+int createIFrame(AddressField address, ControlField control, unsigned char* frame,
+                const unsigned char* data) {
+
+    int bufSize = createFrame(address, control, frame);
+    int i = 0;
+
+    // TODO
+
+    frame[bufSize + i] = FLAG; // End flag
+
+    return 5 + i;
+}
+
+
+int readFrame(unsigned char* buf) {
+
+    unsigned char byte;
+    unsigned int bufSize = 0;
+    unsigned int bytesRead = 0;
+    volatile int firstFlagRead = FALSE;
+    volatile int STOP = FALSE;
+
+    while (!STOP && !alarmEnabled) {
+
+        bytesRead = readByteSerialPort(&byte);
+        if (bytesRead == 0 || bytesRead == -1)
+            continue;
+
+        buf[bufSize++] = byte;
+
+        if (byte == FLAG) {
+            if (firstFlagRead) {
+                STOP = TRUE;
+            } else {
+                firstFlagRead = TRUE;
+            }
+        }
+    }
+    printf("Total bytes received: %d\n", bufSize);
+    return bufSize;
+}
+
+
+void alarmHandler(int signal){
+    alarmCount++;
+    alarmEnabled = TRUE;
 }
