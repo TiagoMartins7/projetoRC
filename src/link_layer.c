@@ -180,12 +180,12 @@ int readFrame(unsigned char* buf) {
         switch (state) {
 
             case START:
-                i = 0;
-                if (byte != FLAG) 
+                if (byte != FLAG)
                     break;
-
-                buf[i++] = byte;
-                state = FLAG_RCV;
+                else {
+                    buf[i++] = byte;
+                    state = FLAG_RCV;
+                }
                 break;
 
             case FLAG_RCV:
@@ -206,7 +206,6 @@ int readFrame(unsigned char* buf) {
             case A_RCV:
                 if (byte == FLAG) {
                     state = FLAG_RCV;
-                    break;
                 } else if (byte == SET || byte == UA || byte == DISC) {
                     // Valid control field, continue
                     buf[i++] = byte;
@@ -221,7 +220,6 @@ int readFrame(unsigned char* buf) {
             case C_RCV:
                 if (byte == FLAG) {
                     state = FLAG_RCV;
-                    break;
                 } else if (byte == (buf[1] ^ buf[2])) {
                     // Valid BCC1, continue
                     buf[i++] = byte;
@@ -231,16 +229,17 @@ int readFrame(unsigned char* buf) {
                     state = START;
                     i = 0;
                 }
+                break;
 
             case BCC1_OK:
             
-                if (byte != FLAG) {
-                    state = START;
-                    i = 0;
-                } else {
+                if (byte == FLAG) {
                     // Frame complete 
                     buf[i++] = byte;
                     state = STOP;
+                } else {
+                    state = START;
+                    i = 0;
                 }
                 break;
 
