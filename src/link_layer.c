@@ -14,9 +14,6 @@
 #define _POSIX_SOURCE 1 // POSIX compliant source
 #define BUF_SIZE 256
 
-// ALARM
-#define MAX_ATTEMPTS 3
-#define TIMEOUT 3 // seconds
 
 int alarmEnabled = FALSE;
 int alarmCount = 0;
@@ -47,11 +44,11 @@ int llOpenTx(LinkLayer llParameters) {
     unsigned char uaBuf[BUF_SIZE] = {0};
     int setBufSize = createFrame(A_SENDER, SET, setBuf);
 
-    while (alarmCount < MAX_ATTEMPTS) {
+    while (alarmCount < llParameters.nRetransmissions) {
         printf("Sending SET frame, attempt %d\n", alarmCount + 1);
         writeBytesSerialPort(setBuf, setBufSize);
 
-        alarm(TIMEOUT); // Set the alarm for timeout
+        alarm(llParameters.timeout); // Set the alarm for timeout
         readFrame(uaBuf);  // Read the response frame from the receiver
         alarmEnabled = FALSE;
 
@@ -171,29 +168,90 @@ int createIFrame(AddressField address, ControlField control, unsigned char* fram
 int readFrame(unsigned char* buf) {
 
     unsigned char byte;
-    unsigned int bufSize = 0;
-    unsigned int bytesRead = 0;
-    volatile int firstFlagRead = FALSE;
-    volatile int STOP = FALSE;
+    unsigned int i = 0;
+    State state = START;
 
-    while (!STOP && !alarmEnabled) {
 
-        bytesRead = readByteSerialPort(&byte);
-        if (bytesRead == 0 || bytesRead == -1)
+    while (state != STOP && !alarmEnabled) {
+
+        if (readByteSerialPort(&byte) < 1)
             continue;
+        
+        switch (state) {
 
-        buf[bufSize++] = byte;
+            case START:
+                i = 0;
+                if (byte != FLAG) 
+                    break;
 
-        if (byte == FLAG) {
-            if (firstFlagRead) {
-                STOP = TRUE;
-            } else {
-                firstFlagRead = TRUE;
-            }
+                buf[i++] = byte;
+                state = FLAG_RCV;
+                break;
+
+            case FLAG_RCV:
+                if (byte == FLAG) {
+                    // Stay in this state
+                    break;
+                } else if (byte == A_SENDER || byte == A_RECEIVER) {
+                    // Valid address field, continue
+                    buf[i++] = byte;
+                    state = A_RCV;
+                } else {
+                    // Invalid frame
+                    state = START;
+                    i = 0;
+                }
+                break;
+
+            case A_RCV:
+                if (byte == FLAG) {
+                    state = FLAG_RCV;
+                    break;
+                } else if (byte == SET || byte == UA || byte == DISC) {
+                    // Valid control field, continue
+                    buf[i++] = byte;
+                    state = C_RCV;
+                } else {
+                    // Invalid frame
+                    state = START;
+                    i = 0;
+                }
+                break;
+
+            case C_RCV:
+                if (byte == FLAG) {
+                    state = FLAG_RCV;
+                    break;
+                } else if (byte == (buf[1] ^ buf[2])) {
+                    // Valid BCC1, continue
+                    buf[i++] = byte;
+                    state = BCC1_OK;
+                } else {
+                    // Invalid frame
+                    state = START;
+                    i = 0;
+                }
+
+            case BCC1_OK:
+            
+                if (byte != FLAG) {
+                    state = START;
+                    i = 0;
+                } else {
+                    // Frame complete 
+                    buf[i++] = byte;
+                    state = STOP;
+                }
+                break;
+
+            case STOP:
+                // Should not reach here
+                break;
+
         }
     }
-    printf("Total bytes received: %d\n", bufSize);
-    return bufSize;
+    printf("Total bytes received: %d\n", i);
+    return i;
 }
 
 

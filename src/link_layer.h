@@ -32,6 +32,15 @@ typedef enum
     A_RECEIVER = 0x01
 } AddressField;
 
+typedef enum {
+    START,
+    FLAG_RCV,
+    A_RCV,
+    C_RCV,
+    BCC1_OK,
+    STOP
+} State;
+
 // Size of maximum acceptable payload.
 // Maximum number of bytes that application layer should send to link layer.
 #define MAX_PAYLOAD_SIZE 1000
