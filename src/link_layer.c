@@ -18,6 +18,15 @@
 int alarmEnabled = FALSE;
 int alarmCount = 0;
 
+typedef enum {
+    START,
+    FLAG_RCV,
+    A_RCV,
+    C_RCV,
+    BCC1_OK,
+    STOP
+} State;
+
 
 ////////////////////////////////////////////////
 // LLOPEN
