@@ -8,8 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CTRL_DATA 1
-#define CTRL_START 2
+#define CTRL_DATA 2
+#define CTRL_START 1
 #define CTRL_END 3
 
 #define TYPE_SIZE 0
