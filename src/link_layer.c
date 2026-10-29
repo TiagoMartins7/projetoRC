@@ -186,6 +186,7 @@ static unsigned int buildIFrame(AddressField address, unsigned char control, uns
 
 // State Machine Frame Reader (handles supervision frames and destuffs I-frames)
 int readFrame(unsigned char* buf) {
+    unsigned char bcc2 = 0;
     unsigned char byte;
     unsigned int i = 0;
     State state = START;
@@ -256,7 +257,7 @@ int readFrame(unsigned char* buf) {
                     buf[i++] = byte;
                 }
 
-                if (buf[3] != buf[1] ^ buf[2]) {
+                if (buf[3] != (buf[1] ^ buf[2])) {
                     // BCC1 error
                     return -1;
                 }
@@ -306,9 +307,12 @@ int readFrame(unsigned char* buf) {
                     // Calculate bcc2
                     unsigned char bcc2 = 0;
                     // Start in the second element of the data
-                    for (int idx = 5; idx++; idx < i - 1) {
-                        bcc2 = buf[idx - 1] ^ buf[idx];
-                    }
+                for (unsigned int idx = 4; idx < i - 2; idx++) {
+                    bcc2 ^= buf[idx];
+                }
+                if (bcc2 != buf[i - 2]) {
+                    return -2; // BCC2 error
+                }
                     if (bcc2 != buf[i-1]) {
                         return -2;
                     }
