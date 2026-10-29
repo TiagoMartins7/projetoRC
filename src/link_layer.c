@@ -58,6 +58,7 @@ typedef enum {
     A_RCV,
     C_RCV,
     BCC1_OK,
+    RCV_DATA,
     STOP
 } State;
 
@@ -79,8 +80,7 @@ static unsigned long numDataFrames = 0;
 static unsigned long numRejFrames = 0;
 static struct timeval startTime;
 
-void alarmHandler(int signalNumber) {
-    (void)signalNumber;
+void alarmHandler(int signal) {
     alarmEnabled = TRUE;
     alarmCount++;
 }
@@ -124,24 +124,37 @@ static void printStatistics(int isTx) {
 // Helper functions
 ////////////////////////////////////////////////
 
-int createFrame(AddressField address, ControlField control, unsigned char* frame) {
-    frame[0] = FLAG;                // Start flag
-    frame[1] = address;             // Address field
-    frame[2] = control;             // Control field
-    frame[3] = frame[1] ^ frame[2]; // BCC1
-    frame[4] = FLAG;                // End flag
-    return 5;
+int createFrameHeader(AddressField address, ControlField control, unsigned char* frame) {
+    int i = 0;
+    frame[i++] = FLAG;                // Start flag
+    frame[i++] = address;             // Address field
+    frame[i++] = control;             // Control field
+
+    // BCC1 (stuffing)
+    if (frame[1] ^ frame[2] == FLAG) {
+        frame[i++] = STUFF;
+        frame[i++] = FLAG_STUFF;
+    } else if (frame[1] ^ frame[2] == FLAG) {
+        frame[i++] = STUFF;
+        frame[i++] = FLAG_STUFF;
+    } else {
+        frame[i++] = frame[1] ^ frame[2];
+    }
+
+    return i;
+}
+
+static unsigned int buildSFrame(AddressField address, ControlField control, unsigned char* frame) {
+    unsigned int idx = createFrameHeader(address, control, frame);
+    frame[idx++] = FLAG;
+    return idx;
 }
 
 // Builds an Information frame with byte stuffing and BCC2
-static int buildIFrame(AddressField address, unsigned char control, unsigned char *frame,
+static unsigned int buildIFrame(AddressField address, unsigned char control, unsigned char *frame,
                        const unsigned char *data, int dataSize) {
-    int idx = 0;
-    frame[idx++] = FLAG;
-    frame[idx++] = address;
-    frame[idx++] = control;
-    frame[idx++] = address ^ control; // BCC1
-
+    unsigned int idx = createFrameHeader(address, control, frame);
+    // bcc2 calculation and data stuffing 
     unsigned char bcc2 = 0;
     for (int i = 0; i < dataSize; i++) {
         bcc2 ^= data[i];
@@ -171,21 +184,12 @@ static int buildIFrame(AddressField address, unsigned char control, unsigned cha
     return idx;
 }
 
-// createIFrame matching the exact 4-argument prototype in link_layer.h
-int createIFrame(AddressField address, ControlField control, unsigned char* frame,
-                 const unsigned char* data) {
-    int dataSize = data ? strlen((const char*)data) : 0;
-    return buildIFrame(address, control, frame, data, dataSize);
-}
-
 // State Machine Frame Reader (handles supervision frames and destuffs I-frames)
 int readFrame(unsigned char* buf) {
     unsigned char byte;
     unsigned int i = 0;
     State state = START;
-    int isIFrame = FALSE;
-    int destuffNext = FALSE;
-    int payloadStart = 4;
+    bool isIFrame = FALSE;
 
     while (state != STOP && !alarmEnabled) {
         int readResult = readByteSerialPort(&byte);
@@ -199,13 +203,12 @@ int readFrame(unsigned char* buf) {
         }
 
         switch (state) {
+
             case START:
+                i = 0;
                 if (byte == FLAG) {
-                    buf[0] = byte;
-                    i = 1;
+                    buf[i++] = byte;
                     state = FLAG_RCV;
-                    destuffNext = FALSE;
-                    isIFrame = FALSE;
                 }
                 break;
 
@@ -217,9 +220,6 @@ int readFrame(unsigned char* buf) {
                     state = A_RCV;
                 } else {
                     state = START;
-                    i = 0;
-                    destuffNext = FALSE;
-                    isIFrame = FALSE;
                 }
                 break;
 
@@ -228,8 +228,6 @@ int readFrame(unsigned char* buf) {
                     state = FLAG_RCV;
                     i = 1;
                     buf[0] = FLAG;
-                    destuffNext = FALSE;
-                    isIFrame = FALSE;
                 } else if (byte == SET || byte == UA || byte == DISC ||
                            byte == RR_0 || byte == RR_1 ||
                            byte == REJ_0 || byte == REJ_1 ||
@@ -239,9 +237,6 @@ int readFrame(unsigned char* buf) {
                     state = C_RCV;
                 } else {
                     state = START;
-                    i = 0;
-                    destuffNext = FALSE;
-                    isIFrame = FALSE;
                 }
                 break;
 
@@ -250,120 +245,79 @@ int readFrame(unsigned char* buf) {
                     state = FLAG_RCV;
                     i = 1;
                     buf[0] = FLAG;
-                    destuffNext = FALSE;
-                    isIFrame = FALSE;
-                } else if (byte == (unsigned char)(buf[1] ^ buf[2])) {
-                    buf[i++] = byte;
-                    state = BCC1_OK;
-                    payloadStart = i;
+                } else if (byte == STUFF) {
+                    break;
+                } else if (byte == STUFF_STUFF) {
+                    buf[i++] = STUFF;
+                } else if (byte == FLAG_STUFF) {
+                    buf[i++] = FLAG;
                 } else {
-                    state = START;
-                    i = 0;
-                    destuffNext = FALSE;
-                    isIFrame = FALSE;
+                    buf[i++] = byte;
+                }
+
+                if (buf[3] != buf[1] ^ buf[2]) {
+                    // BCC1 error
+                    return -1;
                 }
                 break;
 
             case BCC1_OK:
-                if (destuffNext) {
-                    destuffNext = FALSE;
-                    if (byte == FLAG_STUFF) {
-                        buf[i++] = FLAG;
-                    } else if (byte == STUFF_STUFF) {
-                        buf[i++] = STUFF;
-                    } else if (byte == FLAG) {
-                        state = FLAG_RCV;
-                        i = 1;
-                        buf[0] = FLAG;
-                        destuffNext = FALSE;
-                        isIFrame = FALSE;
-                        break;
-                    } else {
-                        state = START;
-                        i = 0;
-                        destuffNext = FALSE;
-                        isIFrame = FALSE;
-                        break;
-                    }
 
-                    if (isIFrame && (i - payloadStart) > (MAX_PAYLOAD_SIZE + 1)) {
-                        state = START;
-                        i = 0;
-                        destuffNext = FALSE;
-                        isIFrame = FALSE;
-                    }
-                } else if (byte == FLAG) {
-                    if (!isIFrame) {
-                        if (i >= BUF_SIZE)
-                            return -1;
-                        buf[i++] = byte;
+                // Supervision or unnumbered frame
+                if (!isIFrame) {
+                    if (byte == FLAG) {
+                        buf[i] = byte;
                         state = STOP;
                     } else {
-                        if (i <= (unsigned int)payloadStart) {
-                            state = START;
-                            i = 0;
-                            destuffNext = FALSE;
-                            isIFrame = FALSE;
-                            break;
-                        }
-
-                        int dataLen = (int)(i - 1) - payloadStart;
-                        if (dataLen < 0 || dataLen > MAX_PAYLOAD_SIZE) {
-                            state = START;
-                            i = 0;
-                            destuffNext = FALSE;
-                            isIFrame = FALSE;
-                            break;
-                        }
-
-                        unsigned char receivedBCC2 = buf[i - 1];
-                        unsigned char calcBCC2 = 0;
-                        for (int k = 0; k < dataLen; k++)
-                            calcBCC2 ^= buf[payloadStart + k];
-
-                        if (calcBCC2 == receivedBCC2) {
-                            if (i >= BUF_SIZE)
-                                return -1;
-                            buf[i++] = byte;
-                            state = STOP;
-                        } else {
-                            /* Address/control bytes remain valid for REJ handling. */
-                            numFramesReceived++;
-                            return -2;
-                        }
-                    }
-                } else {
-                    if (!isIFrame) {
                         state = START;
-                        i = 0;
-                        destuffNext = FALSE;
-                        isIFrame = FALSE;
-                    } else if (byte == STUFF) {
-                        destuffNext = TRUE;
-                    } else {
-                        if (i >= BUF_SIZE)
-                            return -1;
-                        buf[i++] = byte;
-                        if ((i - payloadStart) > (MAX_PAYLOAD_SIZE + 1)) {
-                            state = START;
-                            i = 0;
-                            destuffNext = FALSE;
-                            isIFrame = FALSE;
-                        }
                     }
+                    return 0;
+                // Information frame
+                } else {
+                    state = RCV_DATA;
+                }
+
+                // No break here because we want it to also run RCV_DATA for destuffing the current byte
+
+            case RCV_DATA: 
+
+                // Destuffing
+                if (byte == STUFF) {
+                    // skip 0x7D
+                    break;
+                } else if (byte == FLAG_STUFF) {
+                    buf[i++] = FLAG;
+                } else if (byte == STUFF_STUFF) {
+                    buf[i++] = STUFF;
+                } else if (byte == FLAG) {
+                    // End of data
+                    buf[i] = byte;
+                    state = STOP;
+                } else {
+                    // Normal byte, no destuffing
+                    buf[i++] = byte;
                 }
                 break;
 
+                
             case STOP:
+                if (isIFrame) {
+                    // Calculate bcc2
+                    unsigned char bcc2 = 0;
+                    // Start in the second element of the data
+                    for (int idx = 5; idx++; idx < i - 1) {
+                        bcc2 = buf[idx - 1] ^ buf[idx];
+                    }
+                    if (bcc2 != buf[i-1]) {
+                        return -2;
+                    }
+                }
                 break;
+            }
         }
-    }
-
-    if (state == STOP) {
-        numFramesReceived++;
-        return (int)i;
-    }
-    return -1;
+        
+    if (alarmEnabled) return -3;
+    return (int) i;
 }
 
 ////////////////////////////////////////////////
