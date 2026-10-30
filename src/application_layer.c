@@ -204,6 +204,7 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
                 // Validate payload consistency with packet length
                 if (dataSize != packetLen - 3) {
                     printf("Warning: Packet size mismatch (header: %d, received: %d)\n", dataSize, packetLen - 3);
+                    continue;
                 }
 
                 fwrite(packet + 3, 1, dataSize, file);
