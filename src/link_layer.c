@@ -344,7 +344,7 @@ int llOpenTx(LinkLayer llParameters) {
     int setBufSize = buildSFrame(A_SENDER, SET, setBuf);
     unsigned char attempts = 1;
 
-    while (attempts <= llParams.nRetransmissions) {
+    while (attempts <= llParams.nRetransmissions + 1) {
         printf("Sending SET frame, attempt %d/%d\n",
                attempts, llParams.nRetransmissions);
 
@@ -377,7 +377,7 @@ int llOpenTx(LinkLayer llParameters) {
     }
 
     printf("Failed to establish connection in llOpenTx after %d attempts\n",
-           llParams.nRetransmissions);
+           llParams.nRetransmissions + 1);
     closeSerialPort();
     return -1;
 }
@@ -437,8 +437,8 @@ int llSend(const unsigned char *buf, int bufSize) {
     unsigned char rejCtrl = (txFrameNum == INFO_FRAME_0) ? REJ_0 : REJ_1;
     unsigned char respBuf[BUF_SIZE] = {0};
 
-    for (int attempts = 1; attempts <= llParams.nRetransmissions; attempts++) {
-        printf("Transmitting frame (attempt %d/%d)\n", attempts, llParams.nRetransmissions);
+    for (int attempts = 1; attempts <= llParams.nRetransmissions + 1; attempts++) {
+        printf("Transmitting frame (attempt %d/%d)\n", attempts, llParams.nRetransmissions + 1);
         int written = writeBytesSerialPort(frame, frameSize);
         numFramesSent++;
         numDataFrames++;
@@ -475,7 +475,7 @@ int llSend(const unsigned char *buf, int bufSize) {
 
     printStatistics(1);
 
-    fprintf(stderr, "llSend failed after %d attempts\n", llParams.nRetransmissions);
+    fprintf(stderr, "llSend failed after %d attempts\n", llParams.nRetransmissions + 1);
     return -1;
 }
 
@@ -549,8 +549,8 @@ int llCloseTx() {
     int discSize = buildSFrame(A_SENDER, DISC, discBuf);
     alarmCount = 0;
 
-    for (int attempts = 1; attempts <= llParams.nRetransmissions; attempts++) {
-        printf("Sending DISC frame (Tx), attempt %d/%d\n", attempts, llParams.nRetransmissions);
+    for (int attempts = 1; attempts <= llParams.nRetransmissions + 1; attempts++) {
+        printf("Sending DISC frame (Tx), attempt %d/%d\n", attempts, llParams.nRetransmissions + 1);
         int written = writeBytesSerialPort(discBuf, discSize);
         if (written != discSize) {
             perror("writeBytesSerialPort (DISC)");
@@ -586,7 +586,7 @@ int llCloseTx() {
         /* Keep waiting for the expected DISC without resetting the timer. */
     }
 
-    fprintf(stderr, "llCloseTx failed after %d attempts\n", llParams.nRetransmissions);
+    fprintf(stderr, "llCloseTx failed after %d attempts\n", llParams.nRetransmissions + 1);
     closeSerialPort();
     return -1;
 }
@@ -611,7 +611,7 @@ int llCloseRx() {
     printf("Received DISC frame from Tx, sending DISC\n");
     numFramesReceived++;
 
-    for (int attempts = 1; attempts <= llParams.nRetransmissions; attempts++) {
+    for (int attempts = 1; attempts <= llParams.nRetransmissions + 1; attempts++) {
 
         int written = writeBytesSerialPort(discBuf, discSize);
         if (written != discSize) {
@@ -641,7 +641,7 @@ int llCloseRx() {
         }
     }
 
-    fprintf(stderr, "llCloseRx failed: timed out waiting for UA after %d attempts\n", llParams.nRetransmissions);
+    fprintf(stderr, "llCloseRx failed: timed out waiting for UA after %d attempts\n", llParams.nRetransmissions + 1);
     closeSerialPort();
     printStatistics(FALSE);
     return -1;
