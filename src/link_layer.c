@@ -189,8 +189,8 @@ int readFrame(unsigned char* buf) {
     unsigned int i = 0;
     State state = START;
     alarmEnabled = TRUE;
-    bool isIFrame = FALSE;
-    bool escapePending = FALSE;
+    char isIFrame = FALSE;
+    char escapePending = FALSE;
 
     while (state != STOP && alarmEnabled) {
         int readResult = readByteSerialPort(&byte);
