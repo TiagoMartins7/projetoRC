@@ -15,6 +15,7 @@
 #define TYPE_SIZE 0
 #define TYPE_NAME 1
 
+
 static int buildControlPacket(unsigned char ctrlType, const char *filename, long fileSize, unsigned char *packet) {
     int idx = 0;
     packet[idx++] = ctrlType;
@@ -106,9 +107,10 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             llCloseTx();
             return;
         }
+        printf("Sent START packet\n");
 
         // Send DATA packets
-        unsigned char fileBuf[MAX_PAYLOAD_SIZE - 4];
+        unsigned char fileBuf[MAX_PAYLOAD_SIZE - 6];
         unsigned char dataPacket[MAX_PAYLOAD_SIZE];
         unsigned char seqNum = 0;
         size_t bytesRead;
@@ -126,12 +128,12 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
                 llCloseTx();
                 return;
             }
+            printf("Sent data packet %i\n",seqNum);
 
             seqNum = (seqNum + 1) % 256;
         }
-
-        fclose(file);
-
+        
+        
         // Send END packet
         ctrlLen = buildControlPacket(CTRL_END, filename, fileSize, ctrlPacket);
         if (llSend(ctrlPacket, ctrlLen) < 0) {
@@ -139,8 +141,9 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             llCloseTx();
             return;
         }
-
+        
         printf("File '%s' sent successfully\n", filename);
+        fclose(file);
         llCloseTx();
     }
     else if (strcmp(role, "rx") == 0)
@@ -171,6 +174,7 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         }
 
         long totalReceived = 0;
+        int seqNum;
         while (1) {
             packetLen = llReceive(packet);
             if (packetLen < 0) {
@@ -181,14 +185,15 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             if (packet[0] == CTRL_END) {
                 printf("Received END packet\n");
                 break;
-            }
-
-            if (packet[0] == CTRL_DATA) {
+            } else if (packet[0] == CTRL_DATA) {
                 int dataSize = (packet[2] << 8) | packet[3];
+                seqNum = packet[1];
                 fwrite(packet + 4, 1, dataSize, file);
                 totalReceived += dataSize;
+                printf("Received packet %i\n", seqNum);
             }
         }
+
 
         fclose(file);
         printf("Received file saved to '%s' (%ld bytes)\n", filename, totalReceived);

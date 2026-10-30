@@ -112,7 +112,6 @@ static void printStatistics(int isTx) {
         printf("REJ frames sent: %lu\n", numRejFrames);
     }
     printf("Total time: %.3f seconds\n", totalTime);
-    printf("Timeouts: %d\n", (int)alarmCount);
     if (totalTime > 0) {
         printf("Throughput: %.2f frames/second\n", 
                isTx ? (double)numFramesSent / totalTime : (double)numFramesReceived / totalTime);
@@ -145,9 +144,9 @@ int createFrameHeader(AddressField address, ControlField control, unsigned char*
 }
 
 static unsigned int buildSFrame(AddressField address, ControlField control, unsigned char* frame) {
-    unsigned int idx = createFrameHeader(address, control, frame);
-    frame[idx++] = FLAG;
-    return idx;
+    unsigned int i = createFrameHeader(address, control, frame);
+    frame[i++] = FLAG;
+    return i;
 }
 
 // Builds an Information frame with byte stuffing and BCC2
@@ -189,8 +188,8 @@ int readFrame(unsigned char* buf) {
     unsigned char byte;
     unsigned int i = 0;
     State state = START;
-    bool isIFrame = FALSE;
     alarmEnabled = TRUE;
+    bool isIFrame;
 
     while (state != STOP && alarmEnabled) {
         int readResult = readByteSerialPort(&byte);
@@ -214,6 +213,7 @@ int readFrame(unsigned char* buf) {
                 break;
 
             case FLAG_RCV:
+                i = 1;
                 if (byte == FLAG) {
                     break;
                 } else if (byte == A_SENDER || byte == A_RECEIVER) {
@@ -225,16 +225,15 @@ int readFrame(unsigned char* buf) {
                 break;
 
             case A_RCV:
-                if (byte == FLAG) {
-                    state = FLAG_RCV;
-                    i = 1;
-                    buf[0] = FLAG;
-                } else if (byte == SET || byte == UA || byte == DISC ||
-                           byte == RR_0 || byte == RR_1 ||
-                           byte == REJ_0 || byte == REJ_1 ||
-                           byte == INFO_FRAME_0 || byte == INFO_FRAME_1) {
+            if (byte == FLAG) {
+                state = FLAG_RCV;
+                buf[0] = FLAG;
+            } else if (byte == SET || byte == UA || byte == DISC ||
+                byte == RR_0 || byte == RR_1 ||
+                byte == REJ_0 || byte == REJ_1 ||
+                byte == INFO_FRAME_0 || byte == INFO_FRAME_1) {
                     buf[i++] = byte;
-                    isIFrame = (byte == INFO_FRAME_0 || byte == INFO_FRAME_1);
+                    isIFrame = (byte == INFO_FRAME_0) || (byte == INFO_FRAME_1);
                     state = C_RCV;
                 } else {
                     state = START;
@@ -244,7 +243,6 @@ int readFrame(unsigned char* buf) {
             case C_RCV:
                 if (byte == FLAG) {
                     state = FLAG_RCV;
-                    i = 1;
                     buf[0] = FLAG;
                 } else if (byte == STUFF) {
                     break;
@@ -256,25 +254,27 @@ int readFrame(unsigned char* buf) {
                     buf[i++] = byte;
                 }
 
-                if (buf[3] != buf[1] ^ buf[2]) {
+                if (buf[3] != (buf[1] ^ buf[2])) {
                     // BCC1 error
                     return -1;
                 }
+
+                state = BCC1_OK;
                 break;
 
             case BCC1_OK:
 
-                // Supervision or unnumbered frame
-                if (!isIFrame) {
+            if (!isIFrame) {
+                    // Supervision or unnumbered frame
                     if (byte == FLAG) {
                         buf[i++] = byte;
                         state = STOP;
                     } else {
                         state = START;
                     }
-                    return 0;
-                // Information frame
+                    break;
                 } else {
+                    // Information frame
                     state = RCV_DATA;
                 }
 
@@ -306,10 +306,10 @@ int readFrame(unsigned char* buf) {
                     // Calculate bcc2
                     unsigned char bcc2 = 0;
                     // Start in the second element of the data
-                    for (int idx = 5; idx++; idx < i - 1) {
+                    for (int idx = 5; idx < i - 2; idx++) {
                         bcc2 = buf[idx - 1] ^ buf[idx];
                     }
-                    if (bcc2 != buf[i-1]) {
+                    if (bcc2 != buf[i-2]) {
                         return -2;
                     }
                 }
@@ -344,11 +344,10 @@ int llOpenTx(LinkLayer llParameters) {
     unsigned char uaBuf[SUPERVISION_FRAME_SIZE + 1] = {0};
     int setBufSize = buildSFrame(A_SENDER, SET, setBuf);
     unsigned char attempts = 1;
-    int maxAttempts = 1 + llParameters.nRetransmissions;
 
-    while (attempts <= maxAttempts) {
+    while (attempts <= llParams.nRetransmissions) {
         printf("Sending SET frame, attempt %d/%d\n",
-               attempts, maxAttempts);
+               attempts, llParams.nRetransmissions);
 
         int written = writeBytesSerialPort(setBuf, setBufSize);
         numFramesSent++;
@@ -364,6 +363,7 @@ int llOpenTx(LinkLayer llParameters) {
 
         if (res == -1) {
             // BCC1 error
+            printf("BCC1 error");
             attempts++;
         } else if (res == -3) {
             // Timeout
@@ -378,7 +378,7 @@ int llOpenTx(LinkLayer llParameters) {
     }
 
     printf("Failed to establish connection in llOpenTx after %d attempts\n",
-           maxAttempts);
+           llParams.nRetransmissions);
     closeSerialPort();
     return -1;
 }
@@ -432,14 +432,13 @@ int llSend(const unsigned char *buf, int bufSize) {
 
     alarmCount = 0;
 
-    unsigned char frame[2 * MAX_PAYLOAD_SIZE + 20];
+    unsigned char frame[MAX_PAYLOAD_SIZE + 100];
     int frameSize = buildIFrame(A_SENDER, txFrameNum, frame, buf, bufSize);
     unsigned char expectedRR = (txFrameNum == INFO_FRAME_0) ? RR_1 : RR_0;
     unsigned char rejCtrl = (txFrameNum == INFO_FRAME_0) ? REJ_0 : REJ_1;
     unsigned char respBuf[BUF_SIZE] = {0};
-    int maxAttempts = 1 + llParams.nRetransmissions;
 
-    for (int attempts = 1; attempts <= maxAttempts; attempts++) {
+    for (int attempts = 1; attempts <= llParams.nRetransmissions; attempts++) {
         int written = writeBytesSerialPort(frame, frameSize);
         numFramesSent++;
         numDataFrames++;
@@ -449,32 +448,34 @@ int llSend(const unsigned char *buf, int bufSize) {
         }
 
         alarm(llParams.timeout);
-
         int bytesRead = readFrame(respBuf);
         
-
         if (bytesRead == -1) {
             //BCC1 error
-            break;
+            printf("BCC1 error in llSend\n");
+            continue;
         } else if (bytesRead == -3) {
             // Timeout
-            break;
+            printf("Timeout in llSend\n");
+            continue;
         } else if (bytesRead != SUPERVISION_FRAME_SIZE || respBuf[1] != A_SENDER) {
-            break;
+            continue;
         }
 
         if (respBuf[2] == expectedRR) { 
+            // Got expected IFrame
             txFrameNum = (txFrameNum == INFO_FRAME_0) ? INFO_FRAME_1 : INFO_FRAME_0;
             return bufSize;
-        }
-        if (respBuf[2] == rejCtrl) {        
+        } else if (respBuf[2] == rejCtrl) {        
             numRejFrames++;
-            printf("Received REJ; retransmitting frame (attempt %d/%d)\n", attempts + 1, maxAttempts);
-            break;
+            printf("Received REJ; retransmitting frame (attempt %d/%d)\n", attempts, llParams.nRetransmissions);
+            continue;
         }
     }
 
-    fprintf(stderr, "llSend failed after %d attempts\n", maxAttempts);
+    printStatistics(1);
+
+    fprintf(stderr, "llSend failed after %d attempts\n", llParams.nRetransmissions);
     return -1;
 }
 
@@ -488,8 +489,6 @@ int llReceive(unsigned char *packet) {
         return -1;
     }
 
-    alarmCount = 0;
-
     unsigned char frameBuf[BUF_SIZE];
     unsigned char respBuf[SUPERVISION_FRAME_SIZE];
 
@@ -500,7 +499,10 @@ int llReceive(unsigned char *packet) {
         unsigned char rrCtrl = (rxExpectedFrame == INFO_FRAME_0) ? RR_0 : RR_1;
         unsigned char duplicateCtrl = (rxExpectedFrame == INFO_FRAME_0) ? INFO_FRAME_1 : INFO_FRAME_0;
 
-        if (res == -2) {
+        if (res== -1) {
+            // BCC1 error
+            printf("llReceive: BCC1 error\n");
+        } else if (res == -2) {
             /* BCC2 error: readFrame preserves the valid address/control fields on BCC2 errors. */
             if (frameBuf[2] == rxExpectedFrame) {
                 int respSize = buildSFrame(A_SENDER, rejCtrl, respBuf);
@@ -509,21 +511,23 @@ int llReceive(unsigned char *packet) {
             }
             numFramesSent++;
             continue;
-        } else if (res == 0 || frameBuf[1] != A_SENDER) {
+        } else if (res == 0 || (frameBuf[1] != A_SENDER)) {
             continue;
         } else {
 
             if (frameBuf[2] == duplicateCtrl) {
+                // Duplicate, send same RR as the last one
                 int respSize = buildSFrame(A_SENDER, rrCtrl, respBuf);
                 if (writeBytesSerialPort(respBuf, respSize) != respSize) break;
                 numFramesSent++;
+                printf("llReceive: Duplicate detected\n");
+
             } else if (frameBuf[2] == rxExpectedFrame) {
                 int payloadLen = res - 6;
-                if (payloadLen < 0 || payloadLen > MAX_PAYLOAD_SIZE) continue;
-
+                if (payloadLen < 0 || payloadLen > MAX_PAYLOAD_SIZE) break;
                 memcpy(packet, frameBuf + 4, (size_t)payloadLen);
                 rxExpectedFrame = (rxExpectedFrame == INFO_FRAME_0) ? INFO_FRAME_1 : INFO_FRAME_0;
-                rrCtrl = (rxExpectedFrame == INFO_FRAME_0) ? RR_1 : RR_0;
+                rrCtrl = (rxExpectedFrame == INFO_FRAME_0) ? RR_0 : RR_1;
                 int respSize = buildSFrame(A_SENDER, rrCtrl, respBuf);
                 if (writeBytesSerialPort(respBuf, respSize) != respSize) break;
                 numDataFrames++;
@@ -540,13 +544,13 @@ int llReceive(unsigned char *packet) {
 ////////////////////////////////////////////////
 
 int llCloseTx() {
-    unsigned char discBuf[SUPERVISION_FRAME_SIZE];
-    unsigned char respBuf[BUF_SIZE];
+    unsigned char discBuf[SUPERVISION_FRAME_SIZE+1];
+    unsigned char respBuf[SUPERVISION_FRAME_SIZE+1];
     int discSize = buildSFrame(A_SENDER, DISC, discBuf);
-    int maxAttempts = 1 + llParams.nRetransmissions;
+    alarmCount = 0;
 
-    for (int attempts = 1; attempts <= maxAttempts; attempts++) {
-        printf("Sending DISC frame (Tx), attempt %d/%d\n", attempts, maxAttempts);
+    for (int attempts = 1; attempts <= llParams.nRetransmissions; attempts++) {
+        printf("Sending DISC frame (Tx), attempt %d/%d\n", attempts, llParams.nRetransmissions);
         int written = writeBytesSerialPort(discBuf, discSize);
         if (written != discSize) {
             perror("writeBytesSerialPort (DISC)");
@@ -555,53 +559,46 @@ int llCloseTx() {
         }
         numFramesSent++;
 
-        alarmEnabled = FALSE;
         alarm(llParams.timeout);
-        while (!alarmEnabled) {
-            int bytesRead = readFrame(respBuf);
-            if (alarmEnabled)
-                break;
-            if (bytesRead < 0) {
-                alarm(0);
-                closeSerialPort();
-                return -1;
+        int bytesRead = readFrame(respBuf);
+
+        if (bytesRead == -1) {
+            // BCC1 error
+            printf("BCC1 error\n");
+        } else if (bytesRead == -3) {
+            // Timeout
+            printf("Timeout\n");
+        } else if (bytesRead == SUPERVISION_FRAME_SIZE &&
+            respBuf[1] == A_RECEIVER && respBuf[2] == DISC) {
+
+            printf("Received DISC frame from Rx, sending UA\n");
+            unsigned char uaBuf[SUPERVISION_FRAME_SIZE+1];
+            int uaSize = buildSFrame(A_RECEIVER, UA, uaBuf);
+            if (writeBytesSerialPort(uaBuf, uaSize) != uaSize) {
+                perror("writeBytesSerialPort (UA)");
             }
-            if (bytesRead == SUPERVISION_FRAME_SIZE &&
-                respBuf[1] == A_RECEIVER && respBuf[2] == DISC) {
-                alarm(0);
-                printf("Received DISC frame from Rx, sending UA\n");
-                unsigned char uaBuf[SUPERVISION_FRAME_SIZE];
-                int uaSize = buildSFrame(A_RECEIVER, UA, uaBuf);
-                if (writeBytesSerialPort(uaBuf, uaSize) != uaSize)
-                    perror("writeBytesSerialPort (UA)");
-                else
-                    numFramesSent++;
-                sleep(1);
-                closeSerialPort();
-                printStatistics(TRUE);
-                return 0;
-            }
-            /* Keep waiting for the expected DISC without resetting the timer. */
+            numFramesSent++;
+            closeSerialPort();
+            printStatistics(TRUE);
+            return 0;
         }
-        alarm(0);
+        /* Keep waiting for the expected DISC without resetting the timer. */
     }
 
-    fprintf(stderr, "llCloseTx failed after %d attempts\n", maxAttempts);
+    fprintf(stderr, "llCloseTx failed after %d attempts\n", llParams.nRetransmissions);
     closeSerialPort();
     return -1;
 }
 
 int llCloseRx() {
-    unsigned char buf[BUF_SIZE];
-    unsigned char discBuf[SUPERVISION_FRAME_SIZE];
+    unsigned char buf[SUPERVISION_FRAME_SIZE+1];
+    unsigned char discBuf[SUPERVISION_FRAME_SIZE+1];
     int discSize = buildSFrame(A_RECEIVER, DISC, discBuf);
 
     /* Wait for the first DISC from Tx. This phase has no timer by design. */
     while (TRUE) {
         int bytesRead = readFrame(buf);
         if (bytesRead < 0) {
-            if (alarmEnabled)
-                continue;
             perror("readFrame while waiting for initial DISC");
             closeSerialPort();
             return -1;
@@ -619,69 +616,36 @@ int llCloseRx() {
     }
     numFramesSent++;
 
-    int maxAttempts = 1 + llParams.nRetransmissions;
-    int attempts = 1; /* The first DISC sent above is attempt 1. */
-    alarmEnabled = FALSE;
-    alarm(llParams.timeout);
+    for (int attempts; attempts <= llParams.nRetransmissions; attempts++) {
 
-    while (TRUE) {
-        if (alarmEnabled) {
-            if (attempts >= maxAttempts)
-                break;
-            written = writeBytesSerialPort(discBuf, discSize);
-            if (written != discSize) {
-                alarm(0);
-                perror("writeBytesSerialPort (Rx DISC retry)");
-                closeSerialPort();
-                return -1;
-            }
-            attempts++;
-            numFramesSent++;
-            alarmEnabled = FALSE;
-            alarm(llParams.timeout);
-            continue;
-        }
-
-        int bytesRead = readFrame(buf);
-        if (alarmEnabled)
-            continue;
-        if (bytesRead < 0) {
-            alarm(0);
-            perror("readFrame while waiting for UA");
+        written = writeBytesSerialPort(discBuf, discSize);
+        if (written != discSize) {
+            perror("writeBytesSerialPort (Rx DISC retry)");
             closeSerialPort();
             return -1;
         }
-        if (bytesRead != SUPERVISION_FRAME_SIZE)
-            continue;
+        numFramesSent++;
 
-        if (buf[1] == A_RECEIVER && buf[2] == UA) {
-            alarm(0);
+        alarm(llParams.timeout);
+        int bytesRead = readFrame(buf);
+
+        if (bytesRead == -1) {
+            // BCC1 error
+            printf("BCC1 error\n");
+        } else if (bytesRead == -3) {
+            // Timeout
+            printf("Timeout\n");
+        }else if (bytesRead != SUPERVISION_FRAME_SIZE) {
+            printf("llClose: Wrong size error\n");
+        } else if (buf[1] == A_RECEIVER && buf[2] == UA) {
             printf("Received UA frame from Tx\n");
-            sleep(1);
             closeSerialPort();
             printStatistics(FALSE);
             return 0;
         }
-
-        /* A repeated DISC means Tx did not receive our DISC; resend it, bounded by retries. */
-        if (buf[1] == A_SENDER && buf[2] == DISC && attempts < maxAttempts) {
-            written = writeBytesSerialPort(discBuf, discSize);
-            if (written != discSize) {
-                alarm(0);
-                perror("writeBytesSerialPort (duplicate DISC response)");
-                closeSerialPort();
-                return -1;
-            }
-            attempts++;
-            numFramesSent++;
-            alarmEnabled = FALSE;
-            alarm(llParams.timeout);
-        }
-        /* Unrelated frames do not reset the running timer. */
     }
 
-    alarm(0);
-    fprintf(stderr, "llCloseRx failed: timed out waiting for UA after %d attempts\n", attempts);
+    fprintf(stderr, "llCloseRx failed: timed out waiting for UA after %d attempts\n", llParams.nRetransmissions);
     closeSerialPort();
     printStatistics(FALSE);
     return -1;
