@@ -194,13 +194,8 @@ int readFrame(unsigned char* buf) {
 
     while (state != STOP && alarmEnabled) {
         int readResult = readByteSerialPort(&byte);
-        if (readResult == 0)
+        if (readResult <= 0) {
             continue;
-        if (readResult < 0) {
-            /* SIGALRM may interrupt the serial read; let the caller handle timeout. */
-            if (!alarmEnabled)
-                break;
-            return -1;
         }
 
         switch (state) {
@@ -443,6 +438,7 @@ int llSend(const unsigned char *buf, int bufSize) {
     unsigned char respBuf[BUF_SIZE] = {0};
 
     for (int attempts = 1; attempts <= llParams.nRetransmissions; attempts++) {
+        printf("Transmitting frame (attempt %d/%d)\n", attempts, llParams.nRetransmissions);
         int written = writeBytesSerialPort(frame, frameSize);
         numFramesSent++;
         numDataFrames++;
@@ -456,11 +452,11 @@ int llSend(const unsigned char *buf, int bufSize) {
         
         if (bytesRead == -1) {
             //BCC1 error
-            printf("BCC1 error in llSend\n");
+            printf("llSend: BCC1 error, Do nothing\n");
             continue;
         } else if (bytesRead == -3) {
             // Timeout
-            printf("Timeout in llSend\n");
+            printf("llSend: Timeout\n");
             continue;
         } else if (bytesRead != SUPERVISION_FRAME_SIZE || respBuf[1] != A_SENDER) {
             continue;
@@ -472,7 +468,7 @@ int llSend(const unsigned char *buf, int bufSize) {
             return bufSize;
         } else if (respBuf[2] == rejCtrl) {        
             numRejFrames++;
-            printf("Received REJ; retransmitting frame (attempt %d/%d)\n", attempts, llParams.nRetransmissions);
+            printf("llSend: Received REJ\n");
             continue;
         }
     }
@@ -506,6 +502,7 @@ int llReceive(unsigned char *packet) {
         if (res== -1) {
             // BCC1 error
             printf("llReceive: BCC1 error\n");
+            continue;
         } else if (res == -2) {
             /* BCC2 error: readFrame preserves the valid address/control fields on BCC2 errors. */
             if (frameBuf[2] == rxExpectedFrame) {
@@ -614,7 +611,7 @@ int llCloseRx() {
     printf("Received DISC frame from Tx, sending DISC\n");
     numFramesReceived++;
 
-    for (int attempts; attempts <= llParams.nRetransmissions; attempts++) {
+    for (int attempts = 1; attempts <= llParams.nRetransmissions; attempts++) {
 
         int written = writeBytesSerialPort(discBuf, discSize);
         if (written != discSize) {

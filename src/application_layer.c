@@ -88,7 +88,6 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         FILE *file = fopen(filename, "rb");
         if (!file) {
             perror("fopen");
-            llCloseTx();
             return;
         }
 
@@ -104,7 +103,6 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         if (llSend(ctrlPacket, ctrlLen) < 0) {
             printf("Error sending START packet\n");
             fclose(file);
-            llCloseTx();
             return;
         }
         printf("Sent START packet\n");
@@ -124,7 +122,6 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             if (llSend(dataPacket, bytesRead + 3) < 0) {
                 printf("Error sending DATA packet %d\n", seqNum);
                 fclose(file);
-                llCloseTx();
                 return;
             }
             printf("Sent data packet %i with size %li\n",seqNum, bytesRead + 3);
@@ -137,7 +134,6 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         ctrlLen = buildControlPacket(CTRL_END, filename, fileSize, ctrlPacket);
         if (llSend(ctrlPacket, ctrlLen) < 0) {
             printf("Error sending END packet\n");
-            llCloseTx();
             return;
         }
         
@@ -156,7 +152,6 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         int packetLen = llReceive(packet);
         if (packetLen < 0 || packet[0] != CTRL_START) {
             printf("Error receiving START packet\n");
-            llCloseRx();
             return;
         }
 
@@ -168,7 +163,6 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         FILE *file = fopen(filename, "wb");
         if (!file) {
             perror("fopen");
-            llCloseRx();
             return;
         }
 
