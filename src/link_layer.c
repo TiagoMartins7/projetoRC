@@ -403,7 +403,6 @@ int llOpenTx(LinkLayer llParameters) {
         numFramesSent++;
 
         alarmEnabled = FALSE;
-        alarmCount = 0;
         alarm(llParameters.timeout);
 
         while (!alarmEnabled) {
