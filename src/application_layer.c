@@ -110,27 +110,26 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         printf("Sent START packet\n");
 
         // Send DATA packets
-        unsigned char fileBuf[MAX_PAYLOAD_SIZE - 6];
+        unsigned char fileBuf[MAX_PAYLOAD_SIZE - 3];
         unsigned char dataPacket[MAX_PAYLOAD_SIZE];
         unsigned char seqNum = 0;
         size_t bytesRead;
 
         while ((bytesRead = fread(fileBuf, 1, sizeof(fileBuf), file)) > 0) {
             dataPacket[0] = CTRL_DATA;
-            dataPacket[1] = seqNum;
-            dataPacket[2] = (bytesRead >> 8) & 0xFF;
-            dataPacket[3] = bytesRead & 0xFF;
-            memcpy(dataPacket + 4, fileBuf, bytesRead);
+            dataPacket[1] = (bytesRead >> 8) & 0xFF;
+            dataPacket[2] = bytesRead & 0xFF;
+            memcpy(dataPacket + 3, fileBuf, bytesRead);
 
-            if (llSend(dataPacket, bytesRead + 4) < 0) {
+            if (llSend(dataPacket, bytesRead + 3) < 0) {
                 printf("Error sending DATA packet %d\n", seqNum);
                 fclose(file);
                 llCloseTx();
                 return;
             }
-            printf("Sent data packet %i\n",seqNum);
+            printf("Sent data packet %i with size %li\n",seqNum, bytesRead + 3);
 
-            seqNum = (seqNum + 1) % 256;
+            seqNum++;
         }
         
         
@@ -174,10 +173,11 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         }
 
         long totalReceived = 0;
-        int seqNum;
+        int seqNum = 0;
+
         while (1) {
             packetLen = llReceive(packet);
-            if (packetLen < 0) {
+            if (packetLen < 1) {
                 printf("Error receiving packet in llReceive\n");
                 break;
             }
@@ -186,17 +186,34 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
                 printf("Received END packet\n");
                 break;
             } else if (packet[0] == CTRL_DATA) {
-                int dataSize = (packet[2] << 8) | packet[3];
-                seqNum = packet[1];
-                fwrite(packet + 4, 1, dataSize, file);
+                if (packetLen < 3) {
+                    fprintf(stderr, "Malformed DATA packet: too short\n");
+                    break;
+                }
+
+                int dataSize = 256 * packet[1] + packet[2];
+                if (dataSize != packetLen - 3 || totalReceived + dataSize > fileSize) {
+                    fprintf(stderr, "Malformed DATA packet: invalid data length\n");
+                    break;
+                }
+
+                if (fwrite(packet + 3, 1, (size_t)dataSize, file) != (size_t)dataSize) {
+                    perror("fwrite");
+                    break;
+                }
                 totalReceived += dataSize;
-                printf("Received packet %i\n", seqNum);
+                seqNum++;
+                printf("Received packet %i with size %i\n", seqNum, packetLen);
             }
         }
 
-
         fclose(file);
-        printf("Received file saved to '%s' (%ld bytes)\n", filename, totalReceived);
+        if (totalReceived == fileSize) {
+            printf("Received file saved to '%s' (%ld bytes)\n", filename, totalReceived);
+        } else {
+            fprintf(stderr, "File reception incomplete: received %ld of %ld bytes\n",
+                    totalReceived, fileSize);
+        }
         llCloseRx();
     }
     else

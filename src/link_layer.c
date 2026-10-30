@@ -189,7 +189,8 @@ int readFrame(unsigned char* buf) {
     unsigned int i = 0;
     State state = START;
     alarmEnabled = TRUE;
-    bool isIFrame;
+    bool isIFrame = FALSE;
+    bool escapePending = FALSE;
 
     while (state != STOP && alarmEnabled) {
         int readResult = readByteSerialPort(&byte);
@@ -254,7 +255,7 @@ int readFrame(unsigned char* buf) {
                     buf[i++] = byte;
                 }
 
-                if (buf[3] != (buf[1] ^ buf[2])) {
+                if (buf[3] != (unsigned char) (buf[1] ^ buf[2])) {
                     // BCC1 error
                     return -1;
                 }
@@ -282,14 +283,17 @@ int readFrame(unsigned char* buf) {
 
             case RCV_DATA: 
 
-                // Destuffing
-                if (byte == STUFF) {
-                    // skip 0x7D
-                    break;
-                } else if (byte == FLAG_STUFF) {
-                    buf[i++] = FLAG;
-                } else if (byte == STUFF_STUFF) {
-                    buf[i++] = STUFF;
+                if (escapePending) {
+                    if (byte == FLAG_STUFF) {
+                        buf[i++] = FLAG;
+                    } else if (byte == STUFF_STUFF) {
+                        buf[i++] = STUFF;
+                    } else {
+                        return -2;
+                    }
+                    escapePending = FALSE;
+                } else if (byte == STUFF) {
+                    escapePending = TRUE;
                 } else if (byte == FLAG) {
                     // End of data
                     buf[i++] = byte;
@@ -300,25 +304,25 @@ int readFrame(unsigned char* buf) {
                 }
                 break;
 
-                
             case STOP:
-                if (isIFrame) {
-                    // Calculate bcc2
-                    unsigned char bcc2 = 0;
-                    // Start in the second element of the data
-                    for (int idx = 5; idx < i - 2; idx++) {
-                        bcc2 = buf[idx - 1] ^ buf[idx];
-                    }
-                    if (bcc2 != buf[i-2]) {
-                        return -2;
-                    }
-                }
                 break;
+
             }
         }
         
     alarm(0);
-    if (!alarmEnabled) return -3;
+    if (!alarmEnabled) return -3; // Timeout
+    if (isIFrame) {
+        unsigned char bcc2 = 0;
+        for (unsigned int idx = 4; idx < i - 2; idx++) {
+            bcc2 ^= buf[idx];
+        }
+        if (bcc2 != buf[i - 2]) {
+            // BCC2 error
+            return -2;
+        }
+    }
+
     return (int) i;
 }
 
@@ -432,7 +436,7 @@ int llSend(const unsigned char *buf, int bufSize) {
 
     alarmCount = 0;
 
-    unsigned char frame[MAX_PAYLOAD_SIZE + 100];
+    unsigned char frame[MAX_PAYLOAD_SIZE * 2 + 16];
     int frameSize = buildIFrame(A_SENDER, txFrameNum, frame, buf, bufSize);
     unsigned char expectedRR = (txFrameNum == INFO_FRAME_0) ? RR_1 : RR_0;
     unsigned char rejCtrl = (txFrameNum == INFO_FRAME_0) ? REJ_0 : REJ_1;
@@ -526,12 +530,11 @@ int llReceive(unsigned char *packet) {
                 int payloadLen = res - 6;
                 if (payloadLen < 0 || payloadLen > MAX_PAYLOAD_SIZE) break;
                 memcpy(packet, frameBuf + 4, (size_t)payloadLen);
-                rxExpectedFrame = (rxExpectedFrame == INFO_FRAME_0) ? INFO_FRAME_1 : INFO_FRAME_0;
-                rrCtrl = (rxExpectedFrame == INFO_FRAME_0) ? RR_0 : RR_1;
+                rrCtrl = (rxExpectedFrame == INFO_FRAME_0) ? RR_1 : RR_0;
                 int respSize = buildSFrame(A_SENDER, rrCtrl, respBuf);
                 if (writeBytesSerialPort(respBuf, respSize) != respSize) break;
-                numDataFrames++;
-                numFramesSent++;
+                rxExpectedFrame = (rxExpectedFrame == INFO_FRAME_0) ? INFO_FRAME_1 : INFO_FRAME_0;
+                numDataFrames++; numFramesSent++; numFramesReceived++;
                 return payloadLen;
             }
         }
@@ -572,6 +575,7 @@ int llCloseTx() {
             respBuf[1] == A_RECEIVER && respBuf[2] == DISC) {
 
             printf("Received DISC frame from Rx, sending UA\n");
+            numFramesReceived++;
             unsigned char uaBuf[SUPERVISION_FRAME_SIZE+1];
             int uaSize = buildSFrame(A_RECEIVER, UA, uaBuf);
             if (writeBytesSerialPort(uaBuf, uaSize) != uaSize) {
@@ -608,19 +612,13 @@ int llCloseRx() {
     }
 
     printf("Received DISC frame from Tx, sending DISC\n");
-    int written = writeBytesSerialPort(discBuf, discSize);
-    if (written != discSize) {
-        perror("writeBytesSerialPort (Rx DISC)");
-        closeSerialPort();
-        return -1;
-    }
-    numFramesSent++;
+    numFramesReceived++;
 
     for (int attempts; attempts <= llParams.nRetransmissions; attempts++) {
 
-        written = writeBytesSerialPort(discBuf, discSize);
+        int written = writeBytesSerialPort(discBuf, discSize);
         if (written != discSize) {
-            perror("writeBytesSerialPort (Rx DISC retry)");
+            perror("writeBytesSerialPort (Rx DISC)");
             closeSerialPort();
             return -1;
         }
@@ -639,6 +637,7 @@ int llCloseRx() {
             printf("llClose: Wrong size error\n");
         } else if (buf[1] == A_RECEIVER && buf[2] == UA) {
             printf("Received UA frame from Tx\n");
+            numFramesReceived++;
             closeSerialPort();
             printStatistics(FALSE);
             return 0;
