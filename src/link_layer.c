@@ -1,7 +1,5 @@
 // RCOM 2026/2027
 // Link layer protocol implementation
-//
-// Integrated Stop-and-Wait Error Control Mechanism with State Machine
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -15,7 +13,7 @@
 #include <string.h>
 #include <sys/time.h>
 
-// Protocol-specific definitions kept here so link_layer.h remains unchanged.
+
 #define FLAG 0x7E
 
 typedef enum {
@@ -42,7 +40,6 @@ typedef enum {
 #define STUFF_STUFF 0x5D
 
 
-// Control Field values strictly following the project specification (Slide 10):
 // RR0:  10101010 (0xAA) - Receiver ready to receive Information Frame 0
 // RR1:  10101011 (0xAB) - Receiver ready to receive Information Frame 1
 // REJ0: 01010100 (0x54) - Receiver rejects Information Frame 0

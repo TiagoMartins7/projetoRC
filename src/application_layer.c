@@ -3,200 +3,233 @@
 
 #include "application_layer.h"
 #include "link_layer.h"
+#include "serial_port.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
-#define CTRL_DATA 2
+#define CTRL_DATA  2
 #define CTRL_START 1
-#define CTRL_END 3
+#define CTRL_END   3
+#define TYPE_SIZE  0
+#define TYPE_NAME  1
+#define DATA_HEADER_SIZE 4
+#define MAX_FILE_NAME 255
 
-#define TYPE_SIZE 0
-#define TYPE_NAME 1
+static int buildControlPacket(unsigned char control, const char *name,
+                              long size, unsigned char *packet) {
+    if (!name || !packet || size < 0) return -1;
+    size_t nameLen = strlen(name);
+    if (nameLen == 0 || nameLen > MAX_FILE_NAME) return -1;
 
-static int buildControlPacket(unsigned char ctrlType, const char *filename, long fileSize, unsigned char *packet) {
-    int idx = 0;
-    packet[idx++] = ctrlType;
+    /* Encode the file size in the minimum number of bytes (big-endian). */
+    unsigned long value = (unsigned long)size;
+    int sizeLen = 1;
+    for (unsigned long n = value; n > 0xFF; n >>= 8) sizeLen++;
+    if (1 + 2 + sizeLen + 2 + nameLen > MAX_PAYLOAD_SIZE) return -1;
 
-    // Type 0: File Size
-    packet[idx++] = TYPE_SIZE;
-    packet[idx++] = sizeof(long);
-    for (int i = (int)sizeof(long) - 1; i >= 0; i--) {
-        packet[idx++] = (fileSize >> (i * 8)) & 0xFF;
-    }
-
-    // Type 1: File Name
-    int nameLen = strlen(filename);
-    packet[idx++] = TYPE_NAME;
-    packet[idx++] = nameLen;
-    memcpy(packet + idx, filename, nameLen);
-    idx += nameLen;
-
-    return idx;
+    int i = 0;
+    packet[i++] = control;
+    packet[i++] = TYPE_SIZE;
+    packet[i++] = (unsigned char)sizeLen;
+    for (int shift = (sizeLen - 1) * 8; shift >= 0; shift -= 8)
+        packet[i++] = (unsigned char)(value >> shift);
+    packet[i++] = TYPE_NAME;
+    packet[i++] = (unsigned char)nameLen;
+    memcpy(packet + i, name, nameLen);
+    i += (int)nameLen;
+    return i;
 }
 
-static int parseControlPacket(const unsigned char *packet, int packetLen, char *filename, long *fileSize) {
-    if (packetLen < 1) return -1;
+static int parseControlPacket(const unsigned char *packet, int packetLen,
+                              char *name, size_t nameCapacity, long *size) {
+    if (!packet || packetLen < 1 || !name || nameCapacity == 0 || !size) return -1;
+    if (packet[0] != CTRL_START && packet[0] != CTRL_END) return -1;
 
-    int idx = 1; // skip control byte
-    while (idx < packetLen) {
-        unsigned char type = packet[idx++];
-        unsigned char len = packet[idx++];
-
+    int pos = 1, gotSize = 0, gotName = 0;
+    unsigned long parsedSize = 0;
+    name[0] = '\0';
+    while (pos < packetLen) {
+        if (packetLen - pos < 2) return -1;
+        unsigned char type = packet[pos++];
+        unsigned char len = packet[pos++];
+        if (len > packetLen - pos) return -1;
         if (type == TYPE_SIZE) {
-            long size = 0;
-            for (int i = 0; i < len; i++) {
-                size = (size << 8) | packet[idx++];
+            if (gotSize || len == 0 || len > sizeof(long)) return -1;
+            parsedSize = 0;
+            for (int j = 0; j < len; j++) {
+                if (parsedSize > ((unsigned long)LONG_MAX >> 8)) return -1;
+                parsedSize = (parsedSize << 8) | packet[pos + j];
             }
-            if (fileSize) *fileSize = size;
+            if (parsedSize > LONG_MAX) return -1;
+            gotSize = 1;
         } else if (type == TYPE_NAME) {
-            if (filename) {
-                memcpy(filename, packet + idx, len);
-                filename[len] = '\0';
-            }
-            idx += len;
-        } else {
-            idx += len;
+            if (gotName || len == 0 || (size_t)len >= nameCapacity) return -1;
+            memcpy(name, packet + pos, len);
+            name[len] = '\0';
+            gotName = 1;
         }
+        pos += len;
     }
+    if (!gotSize || !gotName) return -1;
+    *size = (long)parsedSize;
     return 0;
 }
 
 void applicationLayer(const char *serialPort, const char *role, int baudRate,
-                      int nTries, int timeout, const char *filename)
-{
-    // ----------------------------------------------------
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
-
-    LinkLayer llParameters = {
-        .baudRate = baudRate,
-        .nRetransmissions = nTries,
-        .timeout = timeout,
-    };
-    strncpy(llParameters.serialPort, serialPort, sizeof(llParameters.serialPort) - 1);
-
-    if (strcmp(role, "tx") == 0)
-    {
-        if (llOpenTx(llParameters) < 0) {
-            printf("Error: llOpenTx failed\n");
-            return;
-        }
-
-        FILE *file = fopen(filename, "rb");
-        if (!file) {
-            perror("fopen");
-            llCloseTx();
-            return;
-        }
-
-        fseek(file, 0, SEEK_END);
-        long fileSize = ftell(file);
-        fseek(file, 0, SEEK_SET);
-
-        printf("Sending file '%s' (%ld bytes)\n", filename, fileSize);
-
-        // Send START packet
-        unsigned char ctrlPacket[MAX_PAYLOAD_SIZE];
-        int ctrlLen = buildControlPacket(CTRL_START, filename, fileSize, ctrlPacket);
-        if (llSend(ctrlPacket, ctrlLen) < 0) {
-            printf("Error sending START packet\n");
-            fclose(file);
-            llCloseTx();
-            return;
-        }
-
-        // Send DATA packets
-        unsigned char fileBuf[MAX_PAYLOAD_SIZE - 4];
-        unsigned char dataPacket[MAX_PAYLOAD_SIZE];
-        unsigned char seqNum = 0;
-        size_t bytesRead;
-
-        while ((bytesRead = fread(fileBuf, 1, sizeof(fileBuf), file)) > 0) {
-            dataPacket[0] = CTRL_DATA;
-            dataPacket[1] = seqNum;
-            dataPacket[2] = (bytesRead >> 8) & 0xFF;
-            dataPacket[3] = bytesRead & 0xFF;
-            memcpy(dataPacket + 4, fileBuf, bytesRead);
-
-            if (llSend(dataPacket, bytesRead + 4) < 0) {
-                printf("Error sending DATA packet %d\n", seqNum);
-                fclose(file);
-                llCloseTx();
-                return;
-            }
-
-            seqNum = (seqNum + 1) % 256;
-        }
-
-        fclose(file);
-
-        // Send END packet
-        ctrlLen = buildControlPacket(CTRL_END, filename, fileSize, ctrlPacket);
-        if (llSend(ctrlPacket, ctrlLen) < 0) {
-            printf("Error sending END packet\n");
-            llCloseTx();
-            return;
-        }
-
-        printf("File '%s' sent successfully\n", filename);
-        llCloseTx();
+                      int nTries, int timeout, const char *filename) {
+    if (!serialPort || !role || !filename) {
+        fprintf(stderr, "Invalid application parameters\n");
+        return;
     }
-    else if (strcmp(role, "rx") == 0)
-    {
-        if (llOpenRx(llParameters) < 0) {
-            printf("Error: llOpenRx failed\n");
-            return;
+
+    LinkLayer params = {0};
+    if (strlen(serialPort) >= sizeof(params.serialPort)) {
+        fprintf(stderr, "Serial port name too long\n");
+        return;
+    }
+    strcpy(params.serialPort, serialPort);
+    params.baudRate = baudRate;
+    params.nRetransmissions = nTries;
+    params.timeout = timeout;
+
+    if (strcmp(role, "tx") == 0) {
+        /* Open the file first, so a missing file does not open a connection. */
+        FILE *file = fopen(filename, "rb");
+        if (!file) { perror("fopen (tx)"); return; }
+        if (fseek(file, 0, SEEK_END) != 0) {
+            perror("fseek"); fclose(file); return;
         }
+        long fileSize = ftell(file);
+        if (fileSize < 0 || fseek(file, 0, SEEK_SET) != 0) {
+            perror("ftell/fseek"); fclose(file); return;
+        }
+
+        unsigned char controlPacket[MAX_PAYLOAD_SIZE];
+        int controlLen = buildControlPacket(CTRL_START, filename, fileSize, controlPacket);
+        if (controlLen < 0) {
+            fprintf(stderr, "Invalid file name or control packet\n");
+            fclose(file); return;
+        }
+        if (llOpenTx(params) < 0) { fclose(file); return; }
+
+        int success = 1;
+        if (llSend(controlPacket, controlLen) != controlLen) {
+            fprintf(stderr, "Failed to send START\n");
+            success = 0;
+        }
+
+        unsigned char dataPacket[MAX_PAYLOAD_SIZE];
+        unsigned char sequence = 0;
+        while (success) {
+            size_t n = fread(dataPacket + DATA_HEADER_SIZE, 1,
+                             MAX_PAYLOAD_SIZE - DATA_HEADER_SIZE, file);
+            if (n == 0) {
+                if (ferror(file)) { perror("fread"); success = 0; }
+                break;
+            }
+            dataPacket[0] = CTRL_DATA;
+            dataPacket[1] = sequence;
+            dataPacket[2] = (unsigned char)(n >> 8);
+            dataPacket[3] = (unsigned char)n;
+            int packetLen = (int)n + DATA_HEADER_SIZE;
+            if (llSend(dataPacket, packetLen) != packetLen) {
+                fprintf(stderr, "Failed to send DATA packet %u\n", sequence);
+                success = 0;
+                break;
+            }
+            sequence++;
+        }
+
+        if (success) {
+            controlLen = buildControlPacket(CTRL_END, filename, fileSize, controlPacket);
+            if (controlLen < 0 || llSend(controlPacket, controlLen) != controlLen) {
+                fprintf(stderr, "Failed to send END\n");
+                success = 0;
+            }
+        }
+        fclose(file);
+        if (llCloseTx() < 0) success = 0;
+        printf("Transmission %s\n", success ? "completed" : "failed");
+
+    } else if (strcmp(role, "rx") == 0) {
+        if (llOpenRx(params) < 0) return;
 
         unsigned char packet[MAX_PAYLOAD_SIZE];
         int packetLen = llReceive(packet);
-        if (packetLen < 0 || packet[0] != CTRL_START) {
-            printf("Error receiving START packet\n");
-            llCloseRx();
+        char sentName[MAX_FILE_NAME + 1];
+        long expectedSize = 0;
+        int success = packetLen > 0 && packet[0] == CTRL_START &&
+                      parseControlPacket(packet, packetLen, sentName,
+                                         sizeof(sentName), &expectedSize) == 0;
+        if (!success) {
+            fprintf(stderr, "Invalid START packet\n");
+            /* Do not wait for DISC: the peer may no longer be communicating. */
+            closeSerialPort();
             return;
         }
-
-        long fileSize = 0;
-        char rcvFilename[256] = {0};
-        parseControlPacket(packet, packetLen, rcvFilename, &fileSize);
-        printf("Receiving file '%s' (expected size: %ld bytes)\n", filename, fileSize);
+        printf("Receiving '%s' (%ld bytes) into '%s'\n",
+               sentName, expectedSize, filename);
 
         FILE *file = fopen(filename, "wb");
         if (!file) {
-            perror("fopen");
-            llCloseRx();
+            perror("fopen (rx)");
+            closeSerialPort();
             return;
         }
 
-        long totalReceived = 0;
-        while (1) {
+        long total = 0;
+        unsigned char expectedSequence = 0;
+        int gotEnd = 0;
+        while (success && !gotEnd) {
             packetLen = llReceive(packet);
-            if (packetLen < 0) {
-                printf("Error receiving packet in llReceive\n");
-                break;
-            }
-
-            if (packet[0] == CTRL_END) {
-                printf("Received END packet\n");
-                break;
-            }
-
+            if (packetLen <= 0) { fprintf(stderr, "llReceive failed\n"); success = 0; break; }
             if (packet[0] == CTRL_DATA) {
-                int dataSize = (packet[2] << 8) | packet[3];
-                fwrite(packet + 4, 1, dataSize, file);
-                totalReceived += dataSize;
+                if (packetLen < DATA_HEADER_SIZE) { success = 0; break; }
+                int dataSize = ((int)packet[2] << 8) | packet[3];
+                if (dataSize != packetLen - DATA_HEADER_SIZE ||
+                    packet[1] != expectedSequence ||
+                    total > expectedSize || dataSize > expectedSize - total) {
+                    fprintf(stderr, "Invalid DATA packet (sequence/length/size)\n");
+                    success = 0;
+                    break;
+                }
+                if (fwrite(packet + DATA_HEADER_SIZE, 1, (size_t)dataSize, file)
+                    != (size_t)dataSize) {
+                    perror("fwrite"); success = 0; break;
+                }
+                total += dataSize;
+                expectedSequence++;
+            } else if (packet[0] == CTRL_END) {
+                char endName[MAX_FILE_NAME + 1];
+                long endSize = 0;
+                if (parseControlPacket(packet, packetLen, endName,
+                                       sizeof(endName), &endSize) != 0 ||
+                    endSize != expectedSize || strcmp(endName, sentName) != 0 ||
+                    total != expectedSize) {
+                    fprintf(stderr, "END packet or file size mismatch\n");
+                    success = 0;
+                }
+                gotEnd = 1;
+            } else {
+                fprintf(stderr, "Unexpected application packet\n");
+                success = 0;
             }
         }
-
-        fclose(file);
-        printf("Received file saved to '%s' (%ld bytes)\n", filename, totalReceived);
-        llCloseRx();
-    }
-    else
-    {
-        printf("Invalid role: %s. Must be 'tx' or 'rx'.\n", role);
-        return;
+        if (fclose(file) != 0) { perror("fclose"); success = 0; }
+        if (success && gotEnd) {
+            if (llCloseRx() < 0) success = 0;
+        } else {
+            /* An orderly DISC may never arrive after a failed transfer. */
+            closeSerialPort();
+        }
+        if (!success && remove(filename) != 0)
+            perror("remove incomplete received file");
+        printf("Reception %s: %ld/%ld bytes\n",
+               success && gotEnd ? "completed" : "failed", total, expectedSize);
+    } else {
+        fprintf(stderr, "Invalid role '%s' (use tx or rx)\n", role);
     }
 }
